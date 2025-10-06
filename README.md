@@ -195,4 +195,4 @@ diff --git a/README.md b/README.md
 
 ## Licencia
 
-MIT.
+GNU GPLv3.
