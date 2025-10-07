@@ -2,20 +2,20 @@ name: apply-patch-url
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "URL cruda al parche (Raw gist, pastebin, etc.)"
+      patch_url:
+        description: "URL RAW del diff (Gist u otro)"
         required: true
         type: string
       sha256:
-        description: "Hash opcional para verificar el parche"
+        description: "SHA256 esperado del diff (opcional)"
         required: false
         type: string
       commit_direct:
-        description: "Commit directo a la rama por defecto"
+        description: "Hacer push directo a la rama por defecto"
         required: true
         default: "false"
         type: choice
-        options: ["false","true"]
+        options: ["false", "true"]
 
 permissions:
   contents: write
@@ -25,45 +25,116 @@ jobs:
   apply:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Descargar parche
-        run: |
-          set -euo pipefail
-          curl -fsSL "${{ github.event.inputs.url }}" -o /tmp/patch.diff
-          if [ -n "${{ github.event.inputs.sha256 }}" ]; then
-            echo "${{ github.event.inputs.sha256 }}  /tmp/patch.diff" | sha256sum -c -
-          fi
-          sed -i 's/\r$//' /tmp/patch.diff
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detectar rama por defecto
         id: def
+        shell: bash
         run: |
+          set -euo pipefail
+          # intenta leer HEAD remoto
           DEF=$(git remote show origin | sed -n 's/^\s*HEAD branch: //p')
-          echo "def=$DEF" >> $GITHUB_OUTPUT
+          if [ -z "${DEF:-}" ]; then
+            git remote set-head origin -a || true
+            DEF=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+          fi
+          echo "def=${DEF:-main}" >> "$GITHUB_OUTPUT"
 
-      - name: Aplicar parche
+      - name: Descargar diff
+        id: get
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL "${{ github.event.inputs.patch_url }}" -o /tmp/patch.diff
+          # normalizar fin de línea
+          sed -i 's/\r$//' /tmp/patch.diff
+          # verificar sha256 si se aporta
+          if [ -n "${{ github.event.inputs.sha256 }}" ]; then
+            echo "${{ github.event.inputs.sha256 }}  /tmp/patch.diff" | sha256sum -c -
+          fi
+          # mostrar primeras líneas para depurar si hace falta
+          head -n 20 /tmp/patch.diff
+
+      - name: Preflight (no cambia nada)
+        id: preflight
+        shell: bash
+        run: git apply --check /tmp/patch.diff
+        continue-on-error: true
+
+      - name: Diagnóstico si falla preflight
+        if: steps.preflight.outcome != 'success'
+        shell: bash
+        run: |
+          {
+            echo "== git status =="; git status --porcelain=v1 || true
+            echo "== apply --check =="
+            git apply --check /tmp/patch.diff 2> /tmp/apply_check.err || true
+            cat /tmp/apply_check.err || true
+            echo "== primeras 200 líneas del diff =="; sed -n '1,200p' /tmp/patch.diff || true
+          } | tee /tmp/debug.txt
+
+      - name: Artifact de depuración
+        if: steps.preflight.outcome != 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-debug-${{ github.run_id }}
+          path: |
+            /tmp/patch.diff
+            /tmp/apply_check.err
+            /tmp/debug.txt
+
+      - name: Cortar si preflight falló
+        if: steps.preflight.outcome != 'success'
+        shell: bash
+        run: exit 1
+
+      - name: Aplicar diff
+        shell: bash
         run: git apply --index --whitespace=fix --inaccurate-eof /tmp/patch.diff
 
-      - name: PR automático
-        if: ${{ github.event.inputs.commit_direct != 'true' }}
+      - name: ¿Hubo cambios?
+        id: changes
+        shell: bash
+        run: |
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: No hay cambios que commitear
+        if: steps.changes.outputs.changed != 'true'
+        shell: bash
+        run: echo "Diff no produjo cambios. Nada que hacer."
+
+      - name: Crear PR
+        if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct != 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           title: "hope: apply patch"
+          body: |
+            Fuente: ${{ github.event.inputs.patch_url }}
+            SHA256: ${{ github.event.inputs.sha256 || 'n/a' }}
           branch: hope/apply-${{ github.run_id }}
+          base: ${{ steps.def.outputs.def }}
           commit-message: "hope: apply patch"
           delete-branch: true
 
-      - name: Autor del commit
-        if: ${{ github.event.inputs.commit_direct == 'true' }}
+      - name: Autor del commit (push directo)
+        if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct == 'true'
+        shell: bash
         run: |
           git config user.name  "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
 
       - name: Commit y push directo
-        if: ${{ github.event.inputs.commit_direct == 'true' }}
+        if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct == 'true'
         env:
-          TOKEN: ${{ secrets.PAT_PUSH || secrets.GITHUB_TOKEN }}
+          PUSH_TOKEN: ${{ secrets.PAT_PUSH || github.token }}
+        shell: bash
         run: |
           git commit -m "hope: apply patch"
-          git push https://$TOKEN@github.com/${{ github.repository }} HEAD:${{ steps.def.outputs.def }}
+          git push "https://${PUSH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:${{ steps.def.outputs.def }}
