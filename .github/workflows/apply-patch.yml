@@ -29,6 +29,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false   # <- evita inyectar GITHUB_TOKEN en git
 
       - name: Detectar rama por defecto
         id: def
@@ -48,9 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL "${{ github.event.inputs.patch_url }}" -o /tmp/patch.diff
-          # normalizar fin de línea del propio parche
           sed -i 's/\r$//' /tmp/patch.diff
-          # verificar sha256 si se aporta
           if [ -n "${{ github.event.inputs.sha256 }}" ]; then
             echo "${{ github.event.inputs.sha256 }}  /tmp/patch.diff" | sha256sum -c -
           fi
@@ -62,29 +61,18 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          # extraer rutas tocadas por el diff
           grep -E '^diff --git a/' /tmp/patch.diff | awk '{print $3"\n"$4}' \
             | sed -E 's#^[ab]/##' | sed 's#^/+##' | sort -u > /tmp/targets.txt || true
-
-          # normalizar archivos existentes: BOM, CRLF→LF, salto de línea final
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             perl -i -pe 'BEGIN{binmode(STDIN);binmode(STDOUT)} s/^\xEF\xBB\xBF//;' "$f" || true
             sed -i 's/\r$//' "$f" || true
             tail -c1 "$f" | od -An -t x1 | grep -qi '0a' || echo >> "$f"
           done < /tmp/targets.txt
-
-          # preflight estricto
           if git apply --check /tmp/patch.diff 2> /tmp/preflight1.err; then
-            echo "mode=strict" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # preflight tolerante a espacios/EOF
+            echo "mode=strict" >> "$GITHUB_OUTPUT"; exit 0; fi
           if git apply --check --ignore-space-change --inaccurate-eof /tmp/patch.diff 2> /tmp/preflight2.err; then
-            echo "mode=loose" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
+            echo "mode=loose" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "== preflight estricto ==" >> /tmp/debug.txt
           cat /tmp/preflight1.err >> /tmp/debug.txt || true
           echo "== preflight tolerante ==" >> /tmp/debug.txt
@@ -114,14 +102,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Intento 1: git apply normal
           git apply --index --whitespace=fix --inaccurate-eof /tmp/patch.diff || \
-          # Intento 2: git apply tolerante a espacios
           git apply --index --whitespace=fix --inaccurate-eof --ignore-space-change /tmp/patch.diff || \
-          # Intento 3: fallback con 'patch' con fuzz y luego indexar
           { command -v patch >/dev/null && patch -p1 --binary -t -l -N --fuzz=3 < /tmp/patch.diff && git add -A; } || {
-            echo "No se pudo aplicar el diff ni con fallback"; exit 1;
-          }
+            echo "No se pudo aplicar el diff ni con fallback"; exit 1; }
 
       - name: ¿Hubo cambios?
         id: changes
@@ -138,7 +122,7 @@ jobs:
         shell: bash
         run: echo "Diff no produjo cambios."
 
-      - name: Crear PR
+      - name: Crear PR (por defecto)
         if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct != 'true'
         uses: peter-evans/create-pull-request@v7
         with:
@@ -151,18 +135,18 @@ jobs:
           commit-message: "hope: apply patch"
           delete-branch: true
 
-      - name: Autor del commit (push directo)
-        if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct == 'true'
-        shell: bash
-        run: |
-          git config user.name  "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-
-      - name: Commit y push directo
+      - name: Commit y push directo con PAT
         if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct == 'true'
         env:
-          PUSH_TOKEN: ${{ secrets.PAT_PUSH || github.token }}
+          PUSH_TOKEN: ${{ secrets.PAT_PUSH }}   # <- obliga a usar tu PAT
         shell: bash
         run: |
+          set -euo pipefail
+          if [ -z "${PUSH_TOKEN:-}" ]; then
+            echo "Falta secrets.PAT_PUSH con scopes repo,workflow"; exit 1; fi
+          # asegurar que NO hay extraheader con GITHUB_TOKEN
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git config user.name  "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
           git commit -m "hope: apply patch"
           git push "https://${PUSH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:${{ steps.def.outputs.def }}
