@@ -2,12 +2,26 @@ name: apply-patch
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "URL cruda del diff (Gist Raw o similar)"
+      mode:
+        description: "inline | repo | url"
         required: true
+        default: "inline"
+        type: choice
+        options: ["inline","repo","url"]
+      patch:
+        description: "Diff unificado (si mode=inline). SIN ```"
+        required: false
+        type: string
+      path:
+        description: "Ruta del parche en el repo (si mode=repo)"
+        required: false
+        type: string
+      url:
+        description: "URL cruda al parche (si mode=url)"
+        required: false
         type: string
       sha256:
-        description: "Hash SHA256 opcional del diff"
+        description: "Hash opcional para verificar el parche"
         required: false
         type: string
       commit_direct:
@@ -27,10 +41,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Descargar diff (solo URL)
+      - name: Resolver parche
         run: |
           set -euo pipefail
-          curl -fsSL "${{ github.event.inputs.url }}" -o /tmp/patch.diff
+          MODE="${{ github.event.inputs.mode }}"
+          case "$MODE" in
+            inline)
+              test -n "${{ github.event.inputs.patch }}" || { echo "Falta 'patch'"; exit 1; }
+              printf "%s" "${{ github.event.inputs.patch }}" > /tmp/patch.diff
+              ;;
+            repo)
+              test -n "${{ github.event.inputs.path }}"  || { echo "Falta 'path'"; exit 1; }
+              test -f "${{ github.event.inputs.path }}" || { echo "No existe ${{
+                github.event.inputs.path
+              }}"; exit 1; }
+              cp "${{ github.event.inputs.path }}" /tmp/patch.diff
+              ;;
+            url)
+              test -n "${{ github.event.inputs.url }}" || { echo "Falta 'url'"; exit 1; }
+              curl -fsSL "${{ github.event.inputs.url }}" -o /tmp/patch.diff
+              ;;
+            *) echo "mode inválido"; exit 1;;
+          esac
           if [ -n "${{ github.event.inputs.sha256 }}" ]; then
             echo "${{ github.event.inputs.sha256 }}  /tmp/patch.diff" | sha256sum -c -
           fi
@@ -42,20 +74,23 @@ jobs:
           DEF=$(git remote show origin | sed -n 's/^\s*HEAD branch: //p')
           echo "def=$DEF" >> $GITHUB_OUTPUT
 
-      - name: Aplicar patch (3-way)
-        run: |
-          git apply --index --3way --whitespace=fix /tmp/patch.diff
+      - name: Aplicar parche (3-way)
+        run: git apply --index --3way --whitespace=fix /tmp/patch.diff
 
-      - name: Crear PR
+      - name: Limpiar archivo del repo (solo mode=repo)
+        if: ${{ github.event.inputs.mode == 'repo' }}
+        run: git rm -f "${{ github.event.inputs.path }}" || true
+
+      - name: PR automático
         if: ${{ github.event.inputs.commit_direct != 'true' }}
         uses: peter-evans/create-pull-request@v7
         with:
-          title: "hope: apply patch (url only)"
+          title: "hope: apply patch"
           branch: hope/apply-${{ github.run_id }}
           commit-message: "hope: apply patch"
           delete-branch: true
 
-      - name: Autor del commit (directo)
+      - name: Autor del commit
         if: ${{ github.event.inputs.commit_direct == 'true' }}
         run: |
           git config user.name  "${{ github.actor }}"
