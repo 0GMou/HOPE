@@ -35,7 +35,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # intenta leer HEAD remoto
           DEF=$(git remote show origin | sed -n 's/^\s*HEAD branch: //p')
           if [ -z "${DEF:-}" ]; then
             git remote set-head origin -a || true
@@ -49,51 +48,80 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL "${{ github.event.inputs.patch_url }}" -o /tmp/patch.diff
-          # normalizar fin de línea
+          # normalizar fin de línea del propio parche
           sed -i 's/\r$//' /tmp/patch.diff
           # verificar sha256 si se aporta
           if [ -n "${{ github.event.inputs.sha256 }}" ]; then
             echo "${{ github.event.inputs.sha256 }}  /tmp/patch.diff" | sha256sum -c -
           fi
-          # mostrar primeras líneas para depurar si hace falta
-          head -n 20 /tmp/patch.diff
+          head -n 20 /tmp/patch.diff || true
 
-      - name: Preflight (no cambia nada)
-        id: preflight
+      - name: Preflight y normalización
+        id: prep
         shell: bash
-        run: git apply --check /tmp/patch.diff
         continue-on-error: true
-
-      - name: Diagnóstico si falla preflight
-        if: steps.preflight.outcome != 'success'
-        shell: bash
         run: |
-          {
-            echo "== git status =="; git status --porcelain=v1 || true
-            echo "== apply --check =="
-            git apply --check /tmp/patch.diff 2> /tmp/apply_check.err || true
-            cat /tmp/apply_check.err || true
-            echo "== primeras 200 líneas del diff =="; sed -n '1,200p' /tmp/patch.diff || true
-          } | tee /tmp/debug.txt
+          set -euo pipefail
+          # extraer rutas tocadas por el diff
+          grep -E '^diff --git a/' /tmp/patch.diff | awk '{print $3"\n"$4}' \
+            | sed -E 's#^[ab]/##' | sed 's#^/+##' | sort -u > /tmp/targets.txt || true
+
+          # normalizar archivos existentes: BOM, CRLF→LF, salto de línea final
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            perl -i -pe 'BEGIN{binmode(STDIN);binmode(STDOUT)} s/^\xEF\xBB\xBF//;' "$f" || true
+            sed -i 's/\r$//' "$f" || true
+            tail -c1 "$f" | od -An -t x1 | grep -qi '0a' || echo >> "$f"
+          done < /tmp/targets.txt
+
+          # preflight estricto
+          if git apply --check /tmp/patch.diff 2> /tmp/preflight1.err; then
+            echo "mode=strict" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # preflight tolerante a espacios/EOF
+          if git apply --check --ignore-space-change --inaccurate-eof /tmp/patch.diff 2> /tmp/preflight2.err; then
+            echo "mode=loose" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "== preflight estricto ==" >> /tmp/debug.txt
+          cat /tmp/preflight1.err >> /tmp/debug.txt || true
+          echo "== preflight tolerante ==" >> /tmp/debug.txt
+          cat /tmp/preflight2.err >> /tmp/debug.txt || true
+          echo "== primeras 200 líneas del diff ==" >> /tmp/debug.txt
+          sed -n '1,200p' /tmp/patch.diff >> /tmp/debug.txt || true
+          exit 1
 
       - name: Artifact de depuración
-        if: steps.preflight.outcome != 'success'
+        if: steps.prep.outcome != 'success'
         uses: actions/upload-artifact@v4
         with:
           name: patch-debug-${{ github.run_id }}
           path: |
             /tmp/patch.diff
-            /tmp/apply_check.err
+            /tmp/preflight1.err
+            /tmp/preflight2.err
             /tmp/debug.txt
+          if-no-files-found: ignore
 
       - name: Cortar si preflight falló
-        if: steps.preflight.outcome != 'success'
+        if: steps.prep.outcome != 'success'
         shell: bash
         run: exit 1
 
-      - name: Aplicar diff
+      - name: Aplicar diff (multi-intento)
         shell: bash
-        run: git apply --index --whitespace=fix --inaccurate-eof /tmp/patch.diff
+        run: |
+          set -euo pipefail
+          # Intento 1: git apply normal
+          git apply --index --whitespace=fix --inaccurate-eof /tmp/patch.diff || \
+          # Intento 2: git apply tolerante a espacios
+          git apply --index --whitespace=fix --inaccurate-eof --ignore-space-change /tmp/patch.diff || \
+          # Intento 3: fallback con 'patch' con fuzz y luego indexar
+          { command -v patch >/dev/null && patch -p1 --binary -t -l -N --fuzz=3 < /tmp/patch.diff && git add -A; } || {
+            echo "No se pudo aplicar el diff ni con fallback"; exit 1;
+          }
 
       - name: ¿Hubo cambios?
         id: changes
@@ -105,10 +133,10 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: No hay cambios que commitear
+      - name: Sin cambios
         if: steps.changes.outputs.changed != 'true'
         shell: bash
-        run: echo "Diff no produjo cambios. Nada que hacer."
+        run: echo "Diff no produjo cambios."
 
       - name: Crear PR
         if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct != 'true'
