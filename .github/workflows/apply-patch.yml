@@ -1,7 +1,7 @@
 name: apply-patch
 on:
-  workflow_dispatch:
-    inputs:
+workflow_dispatch:
+inputs:
       mode:
         description: "inline | repo | url"
         required: true
@@ -16,34 +16,38 @@ on:
         description: "Ruta del parche en el repo (si mode=repo)"
         required: false
         type: string
-      url:
+url:
         description: "URL cruda al parche (si mode=url)"
         required: false
-        type: string
-      sha256:
-        description: "Hash opcional para verificar el parche"
-        required: false
-        type: string
-      commit_direct:
-        description: "Commit directo a la rama por defecto"
+        description: "URL cruda del diff (Gist Raw o similar)"
         required: true
-        default: "false"
-        type: choice
-        options: ["false","true"]
+type: string
+sha256:
+        description: "Hash opcional para verificar el parche"
+        description: "Hash SHA256 opcional del diff"
+required: false
+type: string
+commit_direct:
+description: "Commit directo a la rama por defecto"
+required: true
+default: "false"
+type: choice
+options: ["false","true"]
 
 permissions:
-  contents: write
-  pull-requests: write
+contents: write
+pull-requests: write
 
 jobs:
-  apply:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+apply:
+runs-on: ubuntu-latest
+steps:
+- uses: actions/checkout@v4
 
       - name: Resolver parche
-        run: |
-          set -euo pipefail
+      - name: Descargar diff (solo URL)
+run: |
+         set -euo pipefail
           MODE="${{ github.event.inputs.mode }}"
           case "$MODE" in
             inline)
@@ -63,16 +67,17 @@ jobs:
               ;;
             *) echo "mode inválido"; exit 1;;
           esac
-          if [ -n "${{ github.event.inputs.sha256 }}" ]; then
-            echo "${{ github.event.inputs.sha256 }}  /tmp/patch.diff" | sha256sum -c -
-          fi
-          sed -i 's/\r$//' /tmp/patch.diff
+          curl -fsSL "${{ github.event.inputs.url }}" -o /tmp/patch.diff
+         if [ -n "${{ github.event.inputs.sha256 }}" ]; then
+           echo "${{ github.event.inputs.sha256 }}  /tmp/patch.diff" | sha256sum -c -
+         fi
+         sed -i 's/\r$//' /tmp/patch.diff
 
-      - name: Detectar rama por defecto
-        id: def
-        run: |
-          DEF=$(git remote show origin | sed -n 's/^\s*HEAD branch: //p')
-          echo "def=$DEF" >> $GITHUB_OUTPUT
+     - name: Detectar rama por defecto
+id: def
+run: |
+         DEF=$(git remote show origin | sed -n 's/^\s*HEAD branch: //p')
+         echo "def=$DEF" >> $GITHUB_OUTPUT
 
       - name: Aplicar parche (3-way)
         run: git apply --index --3way --whitespace=fix /tmp/patch.diff
@@ -80,26 +85,32 @@ jobs:
       - name: Limpiar archivo del repo (solo mode=repo)
         if: ${{ github.event.inputs.mode == 'repo' }}
         run: git rm -f "${{ github.event.inputs.path }}" || true
+      - name: Aplicar patch (3-way)
+        run: |
+          git apply --index --3way --whitespace=fix /tmp/patch.diff
 
       - name: PR automático
-        if: ${{ github.event.inputs.commit_direct != 'true' }}
-        uses: peter-evans/create-pull-request@v7
-        with:
+      - name: Crear PR
+if: ${{ github.event.inputs.commit_direct != 'true' }}
+uses: peter-evans/create-pull-request@v7
+with:
           title: "hope: apply patch"
-          branch: hope/apply-${{ github.run_id }}
-          commit-message: "hope: apply patch"
-          delete-branch: true
+          title: "hope: apply patch (url only)"
+branch: hope/apply-${{ github.run_id }}
+commit-message: "hope: apply patch"
+delete-branch: true
 
       - name: Autor del commit
-        if: ${{ github.event.inputs.commit_direct == 'true' }}
-        run: |
-          git config user.name  "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
+      - name: Autor del commit (directo)
+if: ${{ github.event.inputs.commit_direct == 'true' }}
+run: |
+         git config user.name  "${{ github.actor }}"
+         git config user.email "${{ github.actor }}@users.noreply.github.com"
 
-      - name: Commit y push directo
-        if: ${{ github.event.inputs.commit_direct == 'true' }}
-        env:
-          TOKEN: ${{ secrets.PAT_PUSH || secrets.GITHUB_TOKEN }}
-        run: |
-          git commit -m "hope: apply patch"
-          git push https://$TOKEN@github.com/${{ github.repository }} HEAD:${{ steps.def.outputs.def }}
+     - name: Commit y push directo
+if: ${{ github.event.inputs.commit_direct == 'true' }}
+env:
+TOKEN: ${{ secrets.PAT_PUSH || secrets.GITHUB_TOKEN }}
+run: |
+         git commit -m "hope: apply patch"
+         git push https://$TOKEN@github.com/${{ github.repository }} HEAD:${{ steps.def.outputs.def }}
