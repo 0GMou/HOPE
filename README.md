@@ -133,6 +133,32 @@ jobs:
           git commit -m "hope: apply patch"
           git push https://$TOKEN@github.com/${{ github.repository }} HEAD:${{ steps.def.outputs.def }}
 ````
+## Permisos y credenciales
+
+### Workflow permissions
+
+* Repo → **Settings → Actions → General → Workflow permissions** → **Read and write**.
+
+### PAT para commits como tu usuario (`PAT_PUSH`)
+
+* **Tipo**: **Personal Access Token clásico**.
+* **Scopes** mínimos:
+
+  * `repo` → permite *push* a públicos y privados.
+  * `workflow` → necesario si vas a modificar archivos en `.github/workflows/*` o disparar workflows.
+* Guarda el token como **`PAT_PUSH`** en **Settings → Secrets and variables → Actions → New repository secret**.
+
+### ¿Cuándo usar `PAT_PUSH` vs `GITHUB_TOKEN`?
+
+* **`GITHUB_TOKEN`**: válido para *push* en el **mismo repo** cuando “Workflow permissions” es “Read and write”. El autor saldrá como `github-actions[bot]`.
+* **`PAT_PUSH`**: úsalo si quieres que el commit salga **a tu nombre**, si necesitas empujar a **otro repo**, o si tocas workflows y tu política exige `workflow`.
+
+### Ramas protegidas
+
+* Si la rama por defecto está protegida, `commit_direct=true` puede fallar. Opciones:
+
+  * Usar **PR** (recomendado).
+  * Ajustar reglas de protección para permitir *push* del bot o excepciones controladas.
 
 ## Uso
 
