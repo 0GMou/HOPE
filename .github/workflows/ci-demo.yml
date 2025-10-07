@@ -1,0 +1,91 @@
+name: ci-demo
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ci-demo-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.12'
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install deps
+        run: |
+          if [ -f frontend/package.json ]; then
+            cd frontend
+            npm ci
+          fi
+      - name: Lint
+        if: ${{ hashFiles('frontend/package.json') != '' }}
+        run: |
+          cd frontend
+          npm run lint --if-present
+      - name: Test
+        if: ${{ hashFiles('frontend/package.json') != '' }}
+        run: |
+          cd frontend
+          npm test --if-present
+      - name: Build
+        if: ${{ hashFiles('frontend/package.json') != '' }}
+        run: |
+          cd frontend
+          npm run build --if-present
+      - name: Upload dist
+        if: ${{ hashFiles('frontend/package.json') != '' && hashFiles('frontend/dist/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+      - name: Install deps
+        run: |
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          fi
+      - name: Lint (flake8)
+        run: |
+          if command -v flake8 >/dev/null 2>&1; then
+            flake8 .
+          else
+            echo "flake8 no instalado, omitiendo"
+          fi
+      - name: Test (pytest)
+        run: |
+          if python -c "import sys; import pkgutil; sys.exit(0 if pkgutil.find_loader('pytest') else 1)"; then
+            pytest -q
+          else
+            echo "pytest no instalado, omitiendo"
+          fi
+  e2e:
+    needs: [frontend, backend]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "E2E listo si frontend y backend pasaron."
