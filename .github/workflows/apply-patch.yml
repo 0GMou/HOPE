@@ -42,8 +42,8 @@ jobs:
           DEF=$(git remote show origin | sed -n 's/^\s*HEAD branch: //p')
           echo "def=$DEF" >> $GITHUB_OUTPUT
 
-      - name: Aplicar parche (3-way)
-        run: git apply --index --3way --whitespace=fix /tmp/patch.diff
+      - name: Aplicar parche
+        run: git apply --index --whitespace=fix --inaccurate-eof /tmp/patch.diff
 
       - name: PR automático
         if: ${{ github.event.inputs.commit_direct != 'true' }}
