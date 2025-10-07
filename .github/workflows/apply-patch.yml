@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false   # <- evita inyectar GITHUB_TOKEN en git
+          persist-credentials: false
 
       - name: Detectar rama por defecto
         id: def
@@ -122,7 +122,7 @@ jobs:
         shell: bash
         run: echo "Diff no produjo cambios."
 
-      - name: Crear PR (por defecto)
+      - name: Crear PR con PAT
         if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct != 'true'
         uses: peter-evans/create-pull-request@v7
         with:
@@ -134,17 +134,17 @@ jobs:
           base: ${{ steps.def.outputs.def }}
           commit-message: "hope: apply patch"
           delete-branch: true
+          token: ${{ secrets.PAT_PUSH }}   # <- usa tu PAT para crear/actualizar la rama del PR
 
       - name: Commit y push directo con PAT
         if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_direct == 'true'
         env:
-          PUSH_TOKEN: ${{ secrets.PAT_PUSH }}   # <- obliga a usar tu PAT
+          PUSH_TOKEN: ${{ secrets.PAT_PUSH }}
         shell: bash
         run: |
           set -euo pipefail
           if [ -z "${PUSH_TOKEN:-}" ]; then
             echo "Falta secrets.PAT_PUSH con scopes repo,workflow"; exit 1; fi
-          # asegurar que NO hay extraheader con GITHUB_TOKEN
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config user.name  "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
