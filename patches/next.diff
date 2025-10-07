@@ -1,10 +1,10 @@
 diff --git a/DEMO.md b/DEMO.md
-deleted file mode 100644
---- a/DEMO.md
-+++ /dev/null
-@@ -1,5 +0,0 @@
--# HOPE demo
--Este archivo fue creado por el workflow apply-patch.
--Prueba de creación de archivo y PR automáticos.
--
--OK.
+new file mode 100644
+--- /dev/null
++++ b/DEMO.md
+@@ -0,0 +5 @@
++# HOPE demo
++Este archivo fue creado por el workflow apply-patch.
++Prueba de creación de archivo y PR automáticos.
++
++OK.
